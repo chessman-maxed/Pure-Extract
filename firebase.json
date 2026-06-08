@@ -1,0 +1,10 @@
+{
+  "auth": {
+    "providers": {
+      "googleSignIn": {
+        "oAuthBrandDisplayName": "Pure Extract",
+        "supportEmail": "newventure1211@gmail.com"
+      }
+    }
+  }
+}

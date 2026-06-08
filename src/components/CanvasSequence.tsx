@@ -65,27 +65,107 @@ export function CanvasSequence({ children }: CanvasSequenceProps) {
     ["rgba(239, 68, 68, 0.15)", "rgba(220, 38, 38, 0.25)", "rgba(185, 28, 28, 0.15)"]
   );
 
-  // Preload images
-  useEffect(() => {
-    let loadedCount = 0;
-    const imgArray: HTMLImageElement[] = [];
+  const canvasRectRef = useRef({ width: 0, height: 0 });
+
+  const updateCanvasRect = () => {
+    if (canvasRef.current) {
+      const rect = canvasRef.current.getBoundingClientRect();
+      canvasRectRef.current = {
+        width: rect.width,
+        height: rect.height
+      };
+    }
+  };
+
+  const getNearestLoadedImage = (targetIndex: number) => {
+    const imgList = imagesRef.current;
+    if (imgList.length === 0) return null;
     
+    // Check target first
+    const targetImg = imgList[targetIndex];
+    if (targetImg && targetImg.complete && targetImg.naturalWidth > 0) {
+      return targetImg;
+    }
+    
+    // Search outwards for nearest completed frame
+    let step = 1;
+    while (targetIndex - step >= 0 || targetIndex + step < frameCount) {
+      const prevIdx = targetIndex - step;
+      const nextIdx = targetIndex + step;
+      
+      if (prevIdx >= 0) {
+        const prevImg = imgList[prevIdx];
+        if (prevImg && prevImg.complete && prevImg.naturalWidth > 0) {
+          return prevImg;
+        }
+      }
+      if (nextIdx < frameCount) {
+        const nextImg = imgList[nextIdx];
+        if (nextImg && nextImg.complete && nextImg.naturalWidth > 0) {
+          return nextImg;
+        }
+      }
+      step++;
+    }
+    return null;
+  };
+
+  // Preload critical images first, then load the rest in the background
+  useEffect(() => {
+    const criticalFramesCount = 15;
+    let criticalLoaded = 0;
+    
+    const imgArray: HTMLImageElement[] = [];
     for (let i = 1; i <= frameCount; i++) {
-      const img = new Image();
-      // Files are named 00001.png, 00002.png, etc.
-      const indexStr = i.toString().padStart(5, '0');
+      imgArray.push(new Image());
+    }
+
+    const loadRemainingImages = async () => {
+      const batchSize = 4;
+      for (let i = criticalFramesCount; i < frameCount; i += batchSize) {
+        const batchPromises = [];
+        for (let j = 0; j < batchSize && (i + j) < frameCount; j++) {
+          const idx = i + j;
+          const img = imgArray[idx];
+          if (!img) continue;
+          
+          const p = new Promise<void>((resolve) => {
+            const indexStr = (idx + 1).toString().padStart(5, '0');
+            img.src = `/sequence/${indexStr}.png`;
+            img.onload = () => resolve();
+            img.onerror = () => resolve();
+          });
+          batchPromises.push(p);
+        }
+        await Promise.all(batchPromises);
+      }
+    };
+
+    // Load critical frames (1 to 15) to dismiss the loader quickly
+    for (let i = 0; i < criticalFramesCount; i++) {
+      const img = imgArray[i];
+      const indexStr = (i + 1).toString().padStart(5, '0');
       img.src = `/sequence/${indexStr}.png`;
       
       img.onload = () => {
-        loadedCount++;
-        setLoadProgress(Math.round((loadedCount / frameCount) * 100));
-        if (loadedCount === frameCount) {
+        criticalLoaded++;
+        setLoadProgress(Math.round((criticalLoaded / criticalFramesCount) * 100));
+        if (criticalLoaded === criticalFramesCount) {
           setLoaded(true);
+          loadRemainingImages();
         }
       };
-      imgArray.push(img);
+      
+      img.onerror = () => {
+        criticalLoaded++;
+        setLoadProgress(Math.round((criticalLoaded / criticalFramesCount) * 100));
+        if (criticalLoaded === criticalFramesCount) {
+          setLoaded(true);
+          loadRemainingImages();
+        }
+      };
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect
+    
     setImages(imgArray);
     imagesRef.current = imgArray;
   }, []);
@@ -98,17 +178,25 @@ export function CanvasSequence({ children }: CanvasSequenceProps) {
     const ctx = canvas.getContext("2d", { alpha: false });
     if (!ctx) return;
 
+    // Cache initial dimensions
+    if (canvasRectRef.current.width === 0) {
+      updateCanvasRect();
+    }
+
     const renderFrame = (v: number) => {
       const frameIndex = Math.min(frameCount - 1, Math.floor(v * frameCount));
-      const img = imagesRef.current[frameIndex];
+      const img = getNearestLoadedImage(frameIndex);
       if (!img) return;
 
       const dpr = window.devicePixelRatio || 1;
-      const rect = canvas.getBoundingClientRect();
+      const rect = canvasRectRef.current;
       
-      if (canvas.width !== rect.width * dpr || canvas.height !== rect.height * dpr) {
-        canvas.width = rect.width * dpr;
-        canvas.height = rect.height * dpr;
+      const width = rect.width * dpr;
+      const height = rect.height * dpr;
+
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
       }
 
       const scale = Math.max(canvas.width / img.width, canvas.height / img.height);
@@ -132,17 +220,18 @@ export function CanvasSequence({ children }: CanvasSequenceProps) {
   // Handle Resize
   useEffect(() => {
     const handleResize = () => {
+      updateCanvasRect();
       if (canvasRef.current && imagesRef.current.length > 0) {
         // Force a re-render of the current frame on resize
         const v = scrollYProgress.get();
         const frameIndex = Math.min(frameCount - 1, Math.floor(v * frameCount));
-        const img = imagesRef.current[frameIndex];
+        const img = getNearestLoadedImage(frameIndex);
         if (img) {
           const canvas = canvasRef.current;
           const ctx = canvas.getContext("2d", { alpha: false });
           if (ctx) {
             const dpr = window.devicePixelRatio || 1;
-            const rect = canvas.getBoundingClientRect();
+            const rect = canvasRectRef.current;
             canvas.width = rect.width * dpr;
             canvas.height = rect.height * dpr;
             const scale = Math.max(canvas.width / img.width, canvas.height / img.height);
@@ -153,6 +242,8 @@ export function CanvasSequence({ children }: CanvasSequenceProps) {
         }
       }
     };
+    
+    updateCanvasRect();
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
   }, [scrollYProgress]);
@@ -344,14 +435,23 @@ export function CanvasSequence({ children }: CanvasSequenceProps) {
 }
 
 function JuiceRipple({ index, scrollYProgress }: { index: number, scrollYProgress: any }) {
-  const width = useTransform(scrollYProgress, [0, 1], [200 + index * 100, 1200 + index * 200]);
-  const height = useTransform(scrollYProgress, [0, 1], [200 + index * 100, 1200 + index * 200]);
+  const baseSize = 200 + index * 100;
+  const targetSize = 1200 + index * 200;
+  const maxScale = targetSize / baseSize;
+
+  const scale = useTransform(scrollYProgress, [0, 1], [1, maxScale]);
   const opacity = useTransform(scrollYProgress, [0, 0.5, 1], [0, 0.6 - index * 0.1, 0]);
 
   return (
     <motion.div
       className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full border border-red-500/20 dark:border-red-500/10"
-      style={{ width, height, opacity, translateZ: 0 }}
+      style={{ 
+        width: baseSize, 
+        height: baseSize, 
+        scale, 
+        opacity, 
+        translateZ: 0 
+      }}
     />
   );
 }
